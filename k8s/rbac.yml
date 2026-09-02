@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name:  resource-manager 
+#  kubernates me ek account create hota hai jiska naam idhar hamlogo ne rakha hai resource-manager
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: resource-manager-role
+
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services" ]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: resource-manager-binding
+subjects:
+  - kind: ServiceAccount
+    name: resource-manager  
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: resource-manager-role
+  apiGroup: rbac.authorization.k8s.io
+
+  # hum bind kar rahe hai resource-manager-role ko resource-manager account ke sath
+  # is puri file se hamare pass kya aaya hamare pass aaya resource-manager account ar is account ko hum de denge project service ko 
+  # aisa isliye kyuki resource-manager account ke pass ek permission hai ki ye is account ko create , delete sab kar sakte hai toh agar product 
+  # service ko ye account de dete hai toh uske pass bhi ye power aa jati hai ye sab karne ki 

@@ -1,0 +1,23 @@
+{
+  "name": "sync-service",
+  "version": "1.0.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1116.0",
+    "chokidar": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}

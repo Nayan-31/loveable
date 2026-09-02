@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+
+metadata:
+  name: pineapple
+  labels:
+    app.kubernetes.io/name: pineapple
+
+spec:
+  ingressClassName: nginx
+
+  rules:
+    - host: "*.preview.localhost"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: project-service
+                port:
+                  number: 80
+
+    - host: "*.file-system.localhost"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: project-service
+                port:
+                  number: 80
+
+    - http:
+        paths:
+          - path: /api/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 80
+
+          - path: /api/projects
+            pathType: Prefix
+            backend:
+              service:
+                name: project-service
+                port:
+                  number: 80
