@@ -5,6 +5,9 @@ metadata:
   name: pineapple
   labels:
     app.kubernetes.io/name: pineapple
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
 
 spec:
   ingressClassName: nginx
@@ -49,3 +52,14 @@ spec:
                 name: project-service
                 port:
                   number: 80
+                  
+    - http:
+      paths:
+      - pathType: Prefix
+        path: "/api/ai"
+        backend:
+          service:
+            name: ai-service
+            port: 
+              number: 80
+

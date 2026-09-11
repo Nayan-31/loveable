@@ -1,5 +1,5 @@
 import { Router } from 'express';
-
+import { handleMessageController } from '../controller/ai.controller.js';
 const router = Router();
 
 
@@ -12,6 +12,5 @@ const router = Router();
  * projectId: string
  * }
  */
-router.post("/message",)
-
+router.post("/message", handleMessageController);
 export default router;
