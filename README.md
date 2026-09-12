@@ -594,7 +594,7 @@ kubectl get deployments
 | `express-file-server` | Runtime pod ke `/app` files read/write/delete karta hai | Runtime preview pod ke andar |
 | `sync-service` | Runtime pod ke `/app` files S3 se sync karta hai | Runtime preview pod ke andar |
 | `nextboilerplate` | New project ka starter Next.js app | Runtime preview pod ke andar |
-| `ai-service` | AI assistant/file tools planned hai | Incomplete |
+| `ai-service` | LangChain assistant, file tools, SSE aur conversation history | Docker v2 pod ready; full AI request verification pending (Section 17) |
 | `k8s` | Deployment/service/ingress/RBAC/secrets | Kubernetes manifests |
 
 ## 4. Ports Ka Map
@@ -607,7 +607,7 @@ kubectl get deployments
 | `file-server-container` | `8080` | File APIs |
 | `sync-container` | no HTTP port | S3 sync worker |
 | `redis` | `6379` | Idle preview tracking |
-| `ai-service` | `3001` intended | AI API |
+| `ai-service` | `3001` | AI API; Service port `80` -> targetPort `3001` |
 
 Kubernetes runtime service mapping:
 
@@ -681,7 +681,7 @@ kubectl exec deployment/project-deployment -- sh -c "grep -n 'createPod' /app/sr
 
 ## 6. Kubernetes Apply Flow
 
-Fresh cluster me order important hai.
+Fresh cluster me order important hai. Shared `k8s/ingress.yml` apply karne se pehle Section 17.9 ka AI-rule indentation blocker fix karo.
 
 ```bash
 kubectl apply -f k8s/secrets.yml
@@ -698,7 +698,7 @@ Kya kya banta hai:
 
 ```text
 k8s/secrets.yml
-  -> database, auth, aws, redis, message-broker secrets
+  -> database, auth, aws, redis, message-broker, ai secrets
 
 k8s/redis.yml
   -> redis-deployment
@@ -739,7 +739,7 @@ kubectl get endpoints
 
 File: `k8s/ingress.yml`
 
-Ingress rules:
+Ingress rules ka intended routing (AI rule ki YAML nesting abhi fix karni hai; Section 17.9):
 
 ```text
 /api/auth
@@ -749,6 +749,10 @@ Ingress rules:
 /api/projects
   -> project-service:80
   -> project pod:3000
+
+/api/ai
+  -> ai-service:80
+  -> AI pod:3001
 
 *.preview.localhost
   -> project-service:80
@@ -1584,61 +1588,241 @@ kubectl logs deployment/project-deployment --tail=100
 kubectl logs deployment/ai-deployment --tail=100
 ```
 
-Current warning:
+Current limitation:
 
-AI-service incomplete hai, so ye flow abhi fully reliable nahi hai.
+Consumer wired hai, lekin `consumeMessage()` async callback ko await kiye bina message ack karta hai. Database save fail ho to event already acknowledged ho sakta hai. Consumer persistence aur retry/idempotency ko live test aur harden karna baaki hai; AI Project record missing ho to message request `Project not found` return karegi.
 
-## 17. AI Service Current Status
+## 17. AI Service: LangChain, Messages aur Streaming
 
-AI-service intended hai, complete nahi.
+AI message handling ab implemented hai: controller authenticated project request leta hai, MongoDB history load karta hai, LangChain agent chalata hai, SSE response bhejta hai aur naye AI/tool messages save karta hai. TypeScript aur focused mocked-stream checks pass hue hain. Docker image `ai-service-image:v2` ka pod ready hua, MongoDB/RabbitMQ connection logs aur health-check HTTP 200 verify hue. Live Mistral + frontend + file-tool conversation flow abhi verify karna baaki hai.
 
-Files:
+### 17.1 Kaunsi file kya karti hai?
 
-```text
-ai-service/src/server.ts
-ai-service/src/app/app.ts
-ai-service/src/routes/ai.routes.ts
-ai-service/src/controller/ai.controller.ts
-ai-service/src/service/ai/ai.service.ts
-ai-service/src/service/ai/fs.tool.ts
-ai-service/src/service/ai/fs.agent.ts
+| File | Responsibility |
+| --- | --- |
+| `ai-service/src/server.ts` | Broker/database connect, consumers setup, port `3001` par listen |
+| `ai-service/src/app/app.ts` | JSON parsing, `/api/ai` router aur health endpoints |
+| `ai-service/src/app/index.routes.ts` | Authentication middleware ke baad AI routes mount |
+| `ai-service/src/routes/ai.routes.ts` | `POST /message` ko controller se connect |
+| `ai-service/src/controller/ai.controller.ts` | Ownership checks, conversation/history, SSE aur persistence |
+| `ai-service/src/service/ai/ai.service.ts` | Conversation title generation aur agent stream start |
+| `ai-service/src/service/ai/fs.agent.ts` | Mistral model, file tools aur system instructions se `mainAgent` create |
+| `ai-service/src/service/ai/fs.instruction.ts` | Read-before-edit, complete-file updates aur reply rules |
+| `ai-service/src/service/ai/fs.tool.ts` | Runtime file-server ke liye Axios-backed tools |
+| `ai-service/src/config/env.ts` | Required environment variables aur tracing default |
+| `ai-service/src/models/message.model.ts` | User/AI/tool messages, tool calls aur results ka storage |
+
+### 17.2 Request contract
+
+```http
+POST /api/ai/message
+Authorization: Bearer <access-token>
+Content-Type: application/json
 ```
 
-Intended flow:
+```json
+{
+  "projectId": "project-service-se-mila-project-id",
+  "content": "Homepage ka heading update karo"
+}
+```
+
+Existing chat continue karna ho to `conversationId` bhi bhejo. New conversation ke first request mein is field ko omit karo.
+
+`projectId` original project-service project ka ID hai. AI-service apni local Project collection mein `{ projectId, userId }` se ownership check karti hai; local Project record ka `_id` aur original `projectId` ko interchangeable mat samjho.
+
+### 17.3 Request se response tak complete flow
 
 ```text
 POST /api/ai/message
-  -> authenticate user
-  -> check project belongs to user
-  -> create/find conversation
-  -> generate title with Mistral
-  -> stream AI response
-  -> use file tools to inspect/update runtime files
+  -> Bearer token verify -> req.user
+  -> ProjectModel.findOne({ projectId, userId })
+  -> existing conversation? project/user ownership check
+  -> new conversation? mistral-small-latest se structured title
+  -> X-Conversation-Id / X-Conversation-Title response headers
+  -> user message MongoDB mein save
+  -> history load: createdAt ASC, _id ASC
+  -> user / ai / tool records ko LangChain message objects mein map
+  -> mainAgent.stream(history, configurable.podId = original projectId)
+       -> mistral-large-latest + file tools + mainAgentInstruction
+       -> messages mode: token -> JSON-encoded SSE -> client
+       -> values mode: state snapshot -> naye AI/tool messages -> MongoDB
+  -> stream complete -> res.end()
 ```
 
-Current gaps:
+Model names upar current code ke configured names hain. Agent stream mein `timeout: 600000` pass hota hai. Ye frontend disconnect handling ya har Axios tool request ke liye explicitly configured timeout ka substitute nahi hai.
+
+### 17.4 File tools kaise project tak pahunchte hain?
 
 ```text
-ai.routes.ts me POST /message ke saath controller attached nahi hai
-ai.controller.ts SSE headers set karta hai but response stream complete nahi
-fs.agent.ts agent create karta hai but export/use nahi hota
-fs.tool.ts file server ko likely wrong port pe call karta hai
-ai-service/package.json me build script nahi hai
-ai-service/dockerfile npm run build call karta hai
-ai-service.yml targetPort 8080 hai, app listens 3001
-ai-deployment.yml MISTRAL_API_KEY pass nahi karta
+Agent ko tool call karna hai
+  -> ToolRuntime.configurable.podId
+  -> http://nextjs-service-<projectId>:8000
+  -> Kubernetes service port 8000
+  -> file-server-container targetPort 8080
+  -> runtime project ke files
 ```
 
-Test abhi:
+| Tool | HTTP call | Kaam |
+| --- | --- | --- |
+| `get_file_tree` | `GET /file-tree` | Files discover karna |
+| `get_files` | `GET /files?filenames=...` | Existing file contents read karna |
+| `create_files` | `POST /files` | New files create karna |
+| `update_files` | `PATCH /files` | Complete file content replace karna |
+| `remove_files` | `DELETE /files?filenames=...` | Files/directories remove karna |
+
+Instructions agent ko pehle files read karne, project conventions follow karne aur tool success ke baad hi success claim karne ko kehti hain. Instructions model guidance hain; server-side access control aur file validation ka replacement nahi.
+
+Project ka runtime launch aur file-server ready hona chahiye. AI-service ke local Project record ka hona runtime service running hone ki guarantee nahi hai. Laptop se direct process run karne par cluster-internal service DNS usually available nahi hota; full file-tool flow ke liye cluster networking bhi chahiye.
+
+### 17.5 SSE response aur frontend handling
+
+Response headers:
+
+```text
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+X-Conversation-Id: <conversation-id>
+X-Conversation-Title: <generated-title>
+```
+
+Har token event mein JSON payload hai:
+
+```text
+data: {"text":"Hello\nnext line"}
+
+```
+
+Controller exact frame `data: ${JSON.stringify({ text: token.text })}\n\n` bhejta hai. JSON encoding newline ko escape karti hai, isliye multiline text event boundaries ko break nahi karta.
+
+Frontend ke SSE parser ko complete event milne ke baad:
+
+```ts
+const payload = JSON.parse(eventData);
+appendText(payload.text);
+```
+
+Ye parser callback ka fragment hai, full client nahi. `eventData` sirf SSE `data:` ka content hai. Raw network chunks ko direct `JSON.parse` mat karo: ek event multiple chunks mein split ho sakta hai, ya ek chunk mein multiple events aa sakte hain. Streaming decoder aur SSE frame buffering use karo.
+
+Endpoint `POST` + Bearer header use karta hai, isliye request body/headers support karne wala streaming client, jaise `fetch` with a stream parser, chahiye. Response headers se conversation ID store karke next turn mein bhejo. Current implementation completion par connection end karti hai; explicit `done`/`error` SSE events abhi implemented nahi hain.
+
+### 17.6 History save karne wale fixes
+
+- Loaded history ko stable IDs milte hain; per-request saved-ID set existing records se seed hota hai.
+- `values` snapshot ke sabhi messages inspect hote hain, sirf last message nahi.
+- Multiple tools ek step mein results dein to har result uske `toolCallId` ke saath save hota hai.
+- Repeated snapshots same message ko dobara insert nahi karti; saved mark successful write ke baad hota hai.
+- Full `AIMessage` aur `AIMessageChunk` dono handle hote hain.
+- Structured tool content JSON serialize hota hai, `[object Object]` mein convert nahi hota.
+
+ID-less output ke liye state index fallback hai, jo current append-only history assumption par depend karta hai. Deduplication ek request ke snapshots ke liye hai; concurrent requests, interrupted turns aur client retries ke liye durable idempotency/coordination abhi nahi hai.
+
+### 17.7 Environment setup
+
+`ai-service` local process `dotenv.config()` se `.env` load karta hai. Required values missing/blank ho to import/startup fail hota hai.
+
+| Variable | Current behavior / purpose |
+| --- | --- |
+| `MONGODB_URI` | Required; AI-service database |
+| `ACCESS_TOKEN_SECRET` | Required; auth-service ke compatible signing secret se JWT verification |
+| `MESSAGE_BROKER_URL` | Required; project-created events ke liye RabbitMQ |
+| `MISTRAL_API_KEY` | Required; title aur main model requests |
+| `LANGSMITH_TRACING` | Unset ho to code `true` set karta hai; local tracing off karni ho to `false` |
+| `LANGSMITH_ENDPOINT` | LangSmith endpoint configuration |
+| `LANGSMITH_API_KEY` | Tracing credentials |
+| `LANGSMITH_PROJECT` | Traces group karne ka project name |
+| `PORT` | Config parse karta hai, lekin current `server.ts` hardcoded `3001` par listen karta hai |
+
+Local `.env` ki values apne environment se set karo; real credentials Git mein commit mat karo. Variable names ke template ke liye `k8s/secrets.example.yml` dekho. Local `MONGODB_URI` Kubernetes ke `database` secret ki `AI_DB` key se inject hota hai.
+
+Kubernetes deployment `ai` secret se Mistral key aur chaar LangSmith settings inject karta hai. Ye secret references currently non-optional hain: tracing disabled ho tab bhi referenced keys exist karni chahiye, warna pod container configuration error de sakta hai.
+
+### 17.8 Run aur verify
+
+Project root se:
 
 ```bash
 cd ai-service
+npm ci
 npm exec tsc -- --noEmit
 ```
 
-But Docker build tab tak fail karega jab tak `build` script add nahi hota.
+`.env`, reachable MongoDB aur RabbitMQ configure karne ke baad:
+
+```bash
+npm exec tsx -- src/server.ts
+```
+
+Dusre terminal se:
+
+```bash
+curl -i http://localhost:3001/_status/healthz
+```
+
+`TOKEN` aur `PROJECT_ID` ko apne valid access token aur owned, launched project ID se set karo:
+
+```bash
+TOKEN="paste-access-token"
+PROJECT_ID="paste-project-id"
+curl -N -i -X POST http://localhost:3001/api/ai/message \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"projectId\":\"$PROJECT_ID\",\"content\":\"Project ka file tree check karke structure batao\"}"
+```
+
+`-N` curl output buffering disable karta hai. Ye request real model/tool calls karegi. Local server se file tools test karne ke liye runtime DNS/network connectivity pehle arrange karo; sirf AI-service ko port-forward karna us process ki file-server connectivity fix nahi karta.
+
+Next message mein response se mila conversation ID use karo:
+
+```bash
+CONVERSATION_ID="paste-conversation-id"
+curl -N -i -X POST http://localhost:3001/api/ai/message \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"projectId\":\"$PROJECT_ID\",\"conversationId\":\"$CONVERSATION_ID\",\"content\":\"Pichhli request ka short summary do\"}"
+```
+
+Verify: response text render hota hai, conversation ID reuse hota hai, tool-call/result pairs complete hain aur old history duplicate nahi hoti. Typecheck/model-free checks ye live behavior prove nahi karte. `npm test` abhi placeholder script hai; focused mocked checks permanent npm test suite ka hissa nahi hain.
+
+### 17.9 Kubernetes wiring aur remaining blockers
+
+Configured mapping:
+
+```text
+/api/ai -> ai-service:80 -> AI pod:3001
+AI file tool -> nextjs-service-<projectId>:8000 -> file-server:8080
+```
+
+`k8s/ai-service.yml` ka targetPort ab `3001` hai. Deployment model/tracing variables inject karta hai. Ingress mein read/send timeouts `600` configured hain, lekin current AI rule ki YAML nesting sahi nahi: `paths` ko `http` ke andar hona chahiye, sibling nahi.
+
+Correct rule shape, existing `spec.rules` list ke andar:
+
+```yaml
+    - http:
+        paths:
+          - pathType: Prefix
+            path: /api/ai
+            backend:
+              service:
+                name: ai-service
+                port:
+                  number: 80
+```
+
+**Build status aur pending work:**
+
+- Dockerfile ab dependencies install karke `npm run build` chalata hai aur `node dist/server.js` start karta hai. TypeScript mein `rootDir: ./src` aur `outDir: ./dist` configured hain; missing `dist/server.js` startup error resolve hua. `npm start` script abhi nahi hai; Docker direct Node command use karta hai.
+- Ingress file ka AI rule upar wale nesting pattern se fix karna hai. Shared ingress apply tabhi karo; invalid rule doosre routes ki update bhi block kar sakta hai.
+- Request body/ObjectId validation, stream error/completion events aur client-disconnect cancellation add karni hai.
+- `error.middleware.ts` present hai, lekin app mein mounted nahi; uniform error handling abhi pending hai.
+- Actual streaming latency, ingress buffering, live file edits aur follow-up conversation end-to-end test karne hain.
+
+Ye README current code describe karti hai; upar ke suggested deployment corrections implementation mein automatically apply nahi hue hain.
 
 ## 18. Full Fresh Setup Test Flow
+
+Neeche core auth/project/runtime setup hai. Shared ingress apply se pehle Section 17.9 ka indentation fix chahiye; AI image `v2` build aur pod readiness verify ho chuki hai. AI-service ka local verification flow Section 17.8 mein hai.
 
 Step 1: images build karo
 
@@ -1744,6 +1928,26 @@ kubectl logs nextjs-pod-$ID -c nextjs-container --tail=100
 kubectl logs nextjs-pod-$ID -c file-server-container --tail=100
 kubectl logs nextjs-pod-$ID -c sync-container --tail=100
 ```
+
+AI image build/update karne ke liye project root se:
+
+```bash
+docker build -t ai-service-image:v2 -f ai-service/dockerfile ai-service
+```
+
+Image cluster nodes ko available honi chahiye. Agle code update par naya tag build karke deployment ka image tag bhi update karo, taaki cached image reuse na ho.
+
+AI deployment/service apply karo; ingress command se pehle Section 17.9 ka YAML nesting fix chahiye:
+
+```bash
+kubectl apply -f k8s/ai-deployment.yml
+kubectl apply -f k8s/ai-service.yml
+kubectl apply -f k8s/ingress.yml
+kubectl rollout status deployment/ai-deployment
+kubectl logs deployment/ai-deployment --tail=100
+```
+
+Deployment `ai-service-image:v2` aur `imagePullPolicy: IfNotPresent` use karta hai. Exact image node par cached ho sakti hai; nahi ho to reachable registry se pull honi chahiye. Registry use karo to deployment mein matching qualified image name set karo. Ingress healthy hone ke baad Section 17.8 ke curl examples mein base URL `http://localhost:3001` ki jagah `http://localhost` use karo.
 
 ## 19. Error Debug Map
 
@@ -1993,5 +2197,19 @@ PATCH /files
   -> sync-container watcher sees change
   -> uploads to S3 if credentials valid
 ```
+
+Then AI ko change request bheji:
+
+```text
+POST /api/ai/message + Bearer token
+  -> owned project / conversation checks
+  -> MongoDB history -> LangChain mainAgent
+  -> get_file_tree / get_files -> update_files
+  -> runtime file-server writes complete file
+  -> JSON SSE tokens -> frontend
+  -> new AI + all tool results persisted without snapshot duplicates
+```
+
+Ye AI code path implemented hai; deployment blockers aur live verification status Section 17 mein diye hain.
 
 Ye project ka core flow hai.
