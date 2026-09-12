@@ -15,8 +15,8 @@ spec:
         app:  ai
     spec:
       containers:
-      - image:  ai-service-image
-        imagePullPolicy: Always
+      - image:  ai-service-image:v2
+        imagePullPolicy: IfNotPresent
         name:  ai-service-container
         resources:
           requests:
