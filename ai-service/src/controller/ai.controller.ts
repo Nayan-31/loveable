@@ -23,7 +23,7 @@ export async function handleMessageController(req: Request, res: Response, next:
 
 
     if (req.body.conversationId) {
-        conversation = await ConversationModel.findOne({ _id: req.body.conversationId });
+        conversation = await ConversationModel.findOne({ _id: req.body.conversationId }); //purani chat continue karo
 
         if (!conversation) {
             return res.status(404).json({ error: "Conversation not found" });
@@ -36,7 +36,7 @@ export async function handleMessageController(req: Request, res: Response, next:
         if (conversation.user?.toString() !== user.id) {
             return res.status(403).json({ error: "Conversation does not belong to the user" });
         }
-    } else {
+    } else { //nayi chat banao
 
         const title = await getConversationTitle(req.body.content);
 
@@ -61,18 +61,18 @@ export async function handleMessageController(req: Request, res: Response, next:
 
 
      await MessageModel.create({
-        conversationId: conversation.id,
-        author: "user",
-        content: req.body.content,
-        toolCalls: []
+        conversationId: conversation.id, //Message kis chat ka hai
+        author: "user", //Ye message user ne bheja hai
+        content: req.body.content, //User ka actual message
+        toolCalls: [] //Is user message mein AI ke tool calls nahi hain
     })
 
-    const messages = await MessageModel.find({ conversationId: conversation.id })
+    const messages = await MessageModel.find({ conversationId: conversation.id }) //Backend poori conversation ki history database se nikalta hai.
         .sort({ createdAt: 1, _id: 1 });
 
     const history = messages.map(message => {
             if (message.author === "user") {
-                return new HumanMessage({
+                return new HumanMessage({ //Ye text user ki taraf se aaya hai
                     id: message._id.toString(),
                     content: message.content || "",
                 })
@@ -81,6 +81,7 @@ export async function handleMessageController(req: Request, res: Response, next:
                 return new AIMessage({
                     id: message._id.toString(),
                     content: message.content || "",
+                    //Saved tool calls bhi yahan map hote hain.
                     tool_calls: message.toolCalls?.map(toolCall => {
                         return {
                             id: toolCall.id || "",
@@ -93,9 +94,9 @@ export async function handleMessageController(req: Request, res: Response, next:
 
 
             return new ToolMessage({
-                id: message._id.toString(),
-                content: message.content || "",
-                tool_call_id: message.toolCallId || "",
+                id: message._id.toString(), //database mein is message ka ID
+                content: message.content || "", 
+                tool_call_id: message.toolCallId || "", //AI ki us tool request ka ID, jiska ye jawab hai
                 name: message.toolCalls?.[0]?.name || "",
             })
 
@@ -104,7 +105,7 @@ export async function handleMessageController(req: Request, res: Response, next:
     // State snapshots include the input history and all earlier outputs.
     // Seed their IDs so existing records are not inserted again.
     const savedMessageIds = new Set(history.map(message => message.id!));
-    const stream = await handleUserMessage(history, project.projectId?.toString() || "");
+    const stream = await handleUserMessage(history, project.projectId?.toString() || ""); //Ab prepared history main AI agent ko bhejte hain.
 
     for await (const [mode, data] of stream) {
 
