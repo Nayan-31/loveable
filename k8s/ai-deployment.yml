@@ -15,7 +15,7 @@ spec:
         app:  ai
     spec:
       containers:
-      - image:  ai-service-image:v2
+      - image:  525390917683.dkr.ecr.ap-south-1.amazonaws.com/ai-service 
         imagePullPolicy: IfNotPresent
         name:  ai-service-container
         resources:

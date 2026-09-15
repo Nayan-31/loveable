@@ -6,151 +6,203 @@ import { getConversationTitle } from "../service/ai/ai.service.js";
 import { handleUserMessage } from "../service/ai/ai.service.js";
 import { HumanMessage, AIMessage, ToolMessage, AIMessageChunk } from "langchain";
 
-export async function handleMessageController(req: Request, res: Response, next: NextFunction) {
+import { isObjectIdOrHexString } from "mongoose";
+import { AppError } from "../middlewares/error.middleware.js";
 
-    const user = req.user;
-    let conversation = null;
-
-    if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
+async function requireProject(userId: string, projectId: unknown) {
+    if (typeof projectId !== "string" || !isObjectIdOrHexString(projectId)) {
+        throw new AppError(400, "A valid projectId is required");
     }
-
-    const project = await ProjectModel.findOne({ projectId: req.body.projectId, userId: user.id });
-
+    const project = await ProjectModel.findOne({ projectId, userId }).catch(() => null);
     if (!project) {
-        return res.status(404).json({ error: "Project not found" });
+         throw new AppError(404, "Project not found");
     }
+    return project;
+}
 
-
-    if (req.body.conversationId) {
-        conversation = await ConversationModel.findOne({ _id: req.body.conversationId }); //purani chat continue karo
-
-        if (!conversation) {
-            return res.status(404).json({ error: "Conversation not found" });
-        }
-
-        if (conversation.project?.toString() !== project.id) {
-            return res.status(403).json({ error: "Conversation does not belong to the project" });
-        }
-
-        if (conversation.user?.toString() !== user.id) {
-            return res.status(403).json({ error: "Conversation does not belong to the user" });
-        }
-    } else { //nayi chat banao
-
-        const title = await getConversationTitle(req.body.content);
-
-        conversation = await ConversationModel.create({
-            title,
-            project: project.id,
-            user: user.id
-        })
+async function requireConversation(userId: string, conversationId: unknown) {
+    if (typeof conversationId !== "string" || !isObjectIdOrHexString(conversationId)) {
+        throw new AppError(400, "A valid conversationId is required");
     }
+    const conversation = await ConversationModel.findOne({ _id: conversationId, user: userId });
+    if (!conversation) throw new AppError(404, "Conversation not found");
+    return conversation;
+}
 
+export async function listConversationsController(req: Request, res: Response, next: NextFunction) {
+    try {
+        const project = await requireProject(req.user!.id, req.params.projectId);
+        const conversations = await ConversationModel.find({ project: project.id, user: req.user!.id })
+            .sort({ updatedAt: -1});
+         res.json({
+            conversations: conversations.map(conversation => ({
+                _id: conversation.id,
+                title: conversation.title,
+                createdAt: conversation.createdAt,
+                updatedAt: conversation.updatedAt
+            }))
+        });
+    } catch (error) { next(error); }
+}
 
-    // –––––––––––––––––––– Conversation Headers –––––––––––––––––––
-    res.setHeader('X-Conversation-Id', conversation.id);
-    res.setHeader('X-Conversation-Title', conversation.title);
-    res.setHeader('Access-Control-Expose-Headers', 'X-Conversation-Id, X-Conversation-Title');
+export async function createConversationController(req: Request, res: Response, next: NextFunction) {
+    try {
+        const project = await requireProject(req.user!.id, req.params.projectId);
+        const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
+        const conversation = await ConversationModel.create({ title: title || "New conversation", project: project.id, user: req.user!.id });
+        res.status(201).json({
+             conversation:{
+             _id: conversation.id,
+                title: conversation.title,
+                createdAt: conversation.createdAt,
+                updatedAt: conversation.updatedAt
+        }
+     });
+    } catch (error) { next(error); }
+}
 
-
-    // ––––––––––––––––––– SSE Headers –––––––––––––––––––
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-
-     await MessageModel.create({
-        conversationId: conversation.id, //Message kis chat ka hai
-        author: "user", //Ye message user ne bheja hai
-        content: req.body.content, //User ka actual message
-        toolCalls: [] //Is user message mein AI ke tool calls nahi hain
-    })
-
-    const messages = await MessageModel.find({ conversationId: conversation.id }) //Backend poori conversation ki history database se nikalta hai.
-        .sort({ createdAt: 1, _id: 1 });
-
-    const history = messages.map(message => {
-            if (message.author === "user") {
-                return new HumanMessage({ //Ye text user ki taraf se aaya hai
-                    id: message._id.toString(),
+export async function listMessagesController(req: Request, res: Response, next: NextFunction) {
+    try {
+        const conversation = await requireConversation(req.user!.id, req.params.conversationId);
+        const messages = await MessageModel.find({ conversationId: conversation.id, author: { $in: ["user", "ai"] } })
+            .sort({ createdAt: 1});
+             res.json({
+            conversation: { _id: conversation.id, title: conversation.title },
+            messages: messages
+                .filter(message => (message.content || "").trim().length > 0)
+                .map(message => ({
+                    _id: message.id,
+                    author: message.author,
                     content: message.content || "",
-                })
-            }
-            if (message.author === "ai") {
-                return new AIMessage({
-                    id: message._id.toString(),
-                    content: message.content || "",
-                    //Saved tool calls bhi yahan map hote hain.
-                    tool_calls: message.toolCalls?.map(toolCall => {
-                        return {
-                            id: toolCall.id || "",
-                            name: toolCall.name || "",
-                            args: toolCall.arguments || {}
-                        }
-                    })
-                })
-            }
+                    createdAt: message.createdAt
+                }))
+        });
+    } catch (error) { next(error); }
+}
 
+function sendEvent(res: Response, payload: Record<string, unknown>) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
 
-            return new ToolMessage({
-                id: message._id.toString(), //database mein is message ka ID
-                content: message.content || "", 
-                tool_call_id: message.toolCallId || "", //AI ki us tool request ka ID, jiska ye jawab hai
-                name: message.toolCalls?.[0]?.name || "",
-            })
+function errorMessage(error: unknown) {
+    if (error instanceof AppError) return error.message;
+    const raw = error instanceof Error ? error.message : String(error);
+    if (/timeout|ETIMEDOUT|AbortError/i.test(raw)) return "The AI request timed out. Please try again.";
+    if (/rate.?limit|\b429\b/i.test(raw)) return "The AI model is rate limited. Please try again in a moment.";
+    if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(raw)) return "Could not reach your project runtime. Make sure the preview is running and try again.";
+     return raw || "The AI service failed to complete this request.";
+}
 
+export async function handleMessageController(req: Request, res: Response, next: NextFunction) {
+     let conversation = null;
+    try {
+        const user = req.user;
+        if (!user) throw new AppError(401, "Unauthorized");
+        const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
+        if (!content) throw new AppError(400, "content is required");
+
+        const project = await requireProject(user.id, req.body?.projectId);
+
+        if (req.body.conversationId !== undefined) {
+            conversation = await requireConversation(user.id, req.body.conversationId);
+            if (conversation.project?.toString() !== project.id) 
+                throw new AppError(403, "Conversation does not belong to the project");
+        } else {
+            const title = await getConversationTitle(content).catch(() => content.slice(0, 60));
+            conversation = await ConversationModel.create({ title, project: project.id, user: user.id });
+        }
+       
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders();
+        sendEvent(res, { type: "meta", conversationId: conversation.id, title: conversation.title });
+        await MessageModel.create({
+            conversationId: conversation.id,
+            author: "user",
+            content,
+            toolCalls: []
         });
 
-    // State snapshots include the input history and all earlier outputs.
-    // Seed their IDs so existing records are not inserted again.
-    const savedMessageIds = new Set(history.map(message => message.id!));
-    const stream = await handleUserMessage(history, project.projectId?.toString() || ""); //Ab prepared history main AI agent ko bhejte hain.
+        const history = await MessageModel.find({ conversationId: conversation.id }).sort({ createdAt: 1 });
 
-    for await (const [mode, data] of stream) {
+        const stream = await handleUserMessage(
+            history.map(message => {
+                if (message.author === "user") {
+                    return new HumanMessage(message.content || "")
+                }
+                if (message.author === "ai") {
+                    return new AIMessage({
+                        content: message.content || "",
+                        tool_calls: message.toolCalls?.map(toolCall => {
+                            return {
+                                id: toolCall.id || "",
+                                name: toolCall.name || "",
+                                args: toolCall.arguments || {}
+                            }
+                        })
+                    })
+                }
 
-        if (mode === "messages") {
+                return new ToolMessage({
+                    content: message.content || "",
+                    tool_call_id: message.toolCallId || "",
+                    name: message.toolCalls?.[0]?.name || "",
+                })
 
-            const [token] = data;
+            }), project.projectId?.toString() || "");
 
-            res.write(`data: ${JSON.stringify({ text: token.text })}\n\n`);
-        } else if (mode === "values") {
-            // Persist every output, including parallel tool results, in order.
-            for (const [index, newMessage] of data.messages.entries()) {
-                // This agent appends to history; position is a fallback for ID-less outputs.
-                const messageId = newMessage.id ?? `state-index:${index}`;
-                if (savedMessageIds.has(messageId)) continue;
+        for await (const [mode, data] of stream) {
 
-                if (AIMessage.isInstance(newMessage) || AIMessageChunk.isInstance(newMessage)) {
+            if (mode === "messages") {
+
+                const [token] = data;
+
+                // Tool-call chunks carry no prose, so only assistant text is forwarded.
+                if (token.text) {
+                    sendEvent(res, { type: "token", value: token.text });
+                }
+            } else if (mode === "values") {
+
+                const newMessage = data.messages.at(-1);
+
+                if (newMessage instanceof AIMessageChunk) {
                     await MessageModel.create({
                         conversationId: conversation.id,
                         author: "ai",
                         content: newMessage.text,
-                        toolCalls: newMessage.tool_calls?.map(toolCall => ({
-                            id: toolCall.id || "",
-                            name: toolCall.name || "",
-                            arguments: toolCall.args || {},
-                        })) || [],
+                        toolCalls: newMessage.tool_calls?.map(toolCall => {
+                            return {
+                                id: toolCall.id || "",
+                                name: toolCall.name || "",
+                                arguments: toolCall.args || {}
+                            }
+                        }) || []
                     });
-                } else if (ToolMessage.isInstance(newMessage)) {
+                } else if (newMessage instanceof ToolMessage) {
                     await MessageModel.create({
                         conversationId: conversation.id,
                         author: "tool",
-                        content: typeof newMessage.content === "string"
-                            ? newMessage.content
-                            : JSON.stringify(newMessage.content),
+                        content: String(newMessage.content) || "",
                         toolCallId: newMessage.tool_call_id || "",
                     });
-                } else {
-                    continue;
                 }
 
-                // Only mark saved after the database write succeeds.
-                savedMessageIds.add(messageId);
             }
-
         }
-    }
 
-    res.end();
+        await ConversationModel.updateOne({ _id: conversation.id }, { $set: { updatedAt: new Date() } });
+
+        sendEvent(res, { type: "done" });
+        res.end();
+    } catch (error) {
+        if (!res.headersSent) {
+            return next(error);
+        }
+
+        console.error(error);
+        sendEvent(res, { type: "error", message: errorMessage(error) });
+        res.end();
+    }
 }
