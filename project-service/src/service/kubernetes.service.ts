@@ -28,7 +28,7 @@ export async function createPod(podName: string, projectId: string) {
             initContainers : [
                  {
                     name: 'init-container', //Init container runs before normal application containers.
-                    image: "nextboilerplate:latest",
+                    image: "525390917683.dkr.ecr.ap-south-1.amazonaws.com/nextjs-boilerplate",
                     command: ['sh', '-c', 'mkdir -p /app-copy && cp -r /app/* /app-copy'],
                     volumeMounts: [ //initContainer mein bhi volumeMounts kyu hai? --> Init container ko bhi shared app-volume mein files copy karni hain. Isliye usko bhi volume mount karna padega.
                         {
@@ -41,7 +41,7 @@ export async function createPod(podName: string, projectId: string) {
             containers: [
                 {
                     name: 'nextjs-container',
-                    image: 'nextboilerplate',
+                    image: '525390917683.dkr.ecr.ap-south-1.amazonaws.com/nextjs-boilerplate',
                     ports: [
                         {
                             containerPort: 3000
@@ -66,7 +66,7 @@ export async function createPod(podName: string, projectId: string) {
                 },
                 {
                     name: 'file-server-container',
-                    image: 'express-file-server',
+                    image: '525390917683.dkr.ecr.ap-south-1.amazonaws.com/express-file-server',
                     ports: [
                         {
                             containerPort: 8080
@@ -91,7 +91,7 @@ export async function createPod(podName: string, projectId: string) {
                 },
                 {
                     name: 'sync-container',
-                    image: 'sync-service',
+                    image: '525390917683.dkr.ecr.ap-south-1.amazonaws.com/sync-service',
                     env: [
                         {
                             name: "PROJECT_ID",
@@ -175,7 +175,7 @@ export async function createService(serviceName: string , podName : string){
                     targetPort: 8080
                 }
             ],
-            type: 'LoadBalancer'
+            type: 'ClusterIP'
         }
     }
 

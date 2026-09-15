@@ -8,6 +8,8 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # SSE streaming from ai-service must not be buffered.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
 
 spec:
   ingressClassName: nginx
@@ -54,12 +56,11 @@ spec:
                   number: 80
                   
     - http:
-      paths:
-      - pathType: Prefix
-        path: "/api/ai"
-        backend:
-          service:
-            name: ai-service
-            port: 
-              number: 80
-
+        paths:
+          - pathType: Prefix
+            path: /api/ai
+            backend:
+              service:
+                name: ai-service
+                port:
+                  number: 80

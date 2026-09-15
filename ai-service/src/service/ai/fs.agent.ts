@@ -5,7 +5,7 @@ import { fileTools } from "./fs.tool.js";
 import { mainAgentInstruction } from "../ai/fs.instruction.js";
 
 const model = new ChatMistralAI({
-    model: "mistral-large-latest",
+    model: "mistral-small-latest",
     apiKey: env.MISTRAL_API_KEY,
 })
 
